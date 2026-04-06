@@ -500,56 +500,341 @@ const ambient = new THREE.AmbientLight(0xffffff, 0.15);
 scene.add(ambient);
 
 // ════════════════════════════════════════════════
-// PROCEDURAL BUST
+// PROCEDURAL TEXTURES & NOISE
 // ════════════════════════════════════════════════
-let skinMat;
+function valueNoise(x, y) {
+  var ix = Math.floor(x), iy = Math.floor(y);
+  var fx = x - ix,        fy = y - iy;
+  var ux = fx*fx*(3-2*fx), uy = fy*fy*(3-2*fy);
+  function h(a,b){ return (Math.sin(a*127.1+b*311.7)*43758.5453)%1; }
+  var a=h(ix,iy), b=h(ix+1,iy), c=h(ix,iy+1), d=h(ix+1,iy+1);
+  return a+(b-a)*ux+(c-a)*uy+(d+a-b-c)*ux*uy;
+}
+function fbm(x,y,oct) {
+  var v=0, amp=1, freq=1, tot=0;
+  for(var i=0;i<oct;i++){ v+=valueNoise(x*freq,y*freq)*amp; tot+=amp; amp*=0.5; freq*=2.1; }
+  return v/tot;
+}
+
+function genNormalMap(sz) {
+  var cvs=document.createElement('canvas'); cvs.width=cvs.height=sz;
+  var ctx=cvs.getContext('2d'), img=ctx.createImageData(sz,sz);
+  for(var y=0;y<sz;y++) for(var x=0;x<sz;x++) {
+    var nx=x/sz*12, ny=y/sz*12;
+    var dx = fbm(nx+47.3,ny+17.2,4)*0.7 + fbm(nx*3+5,ny*3,2)*0.3;
+    var dy = fbm(nx+13.5,ny+83.4,4)*0.7 + fbm(nx*3,ny*3+7,2)*0.3;
+    var i=(y*sz+x)*4;
+    img.data[i]  =Math.floor((dx*0.28+0.5)*255);
+    img.data[i+1]=Math.floor((dy*0.28+0.5)*255);
+    img.data[i+2]=200; img.data[i+3]=255;
+  }
+  ctx.putImageData(img,0,0);
+  var t=new THREE.CanvasTexture(cvs);
+  t.wrapS=t.wrapT=THREE.RepeatWrapping; t.repeat.set(6,6); return t;
+}
+
+function genRoughnessMap(sz) {
+  var cvs=document.createElement('canvas'); cvs.width=cvs.height=sz;
+  var ctx=cvs.getContext('2d'), img=ctx.createImageData(sz,sz);
+  for(var y=0;y<sz;y++) for(var x=0;x<sz;x++) {
+    var nx=x/sz*8, ny=y/sz*8;
+    var n=fbm(nx,ny,3)*0.18;
+    var i=(y*sz+x)*4; var v=Math.floor((0.65+n)*255);
+    img.data[i]=img.data[i+1]=img.data[i+2]=v; img.data[i+3]=255;
+  }
+  ctx.putImageData(img,0,0);
+  var t=new THREE.CanvasTexture(cvs);
+  t.wrapS=t.wrapT=THREE.RepeatWrapping; t.repeat.set(4,4); return t;
+}
+
+function genIrisTex(sz, baseHex) {
+  var cvs=document.createElement('canvas'); cvs.width=cvs.height=sz;
+  var ctx=cvs.getContext('2d');
+  var cx=sz/2, cy=sz/2, r=sz/2;
+  ctx.fillStyle=baseHex; ctx.beginPath(); ctx.arc(cx,cy,r,0,Math.PI*2); ctx.fill();
+  for(var i=0;i<100;i++){
+    var a=(i/100)*Math.PI*2+((i*7.3)%1)*0.15;
+    var rMin=r*0.18, rMax=r*(0.65+(i*3.7%1)*0.28);
+    ctx.strokeStyle='rgba(255,240,180,'+(0.08+(i*1.3%1)*0.18)+')';
+    ctx.lineWidth=0.4+(i*2.1%1);
+    ctx.beginPath(); ctx.moveTo(cx+Math.cos(a)*rMin,cy+Math.sin(a)*rMin);
+    ctx.lineTo(cx+Math.cos(a)*rMax,cy+Math.sin(a)*rMax); ctx.stroke();
+  }
+  for(var i=0;i<50;i++){
+    var a=(i/50)*Math.PI*2+(i*5.1%1)*0.2;
+    ctx.strokeStyle='rgba(0,0,0,'+(0.06+(i*2.3%1)*0.1)+')';
+    ctx.lineWidth=0.3+(i*1.7%1)*0.8;
+    ctx.beginPath(); ctx.moveTo(cx+Math.cos(a)*r*0.2,cy+Math.sin(a)*r*0.2);
+    ctx.lineTo(cx+Math.cos(a)*r*0.7,cy+Math.sin(a)*r*0.7); ctx.stroke();
+  }
+  var limbal=ctx.createRadialGradient(cx,cy,r*0.68,cx,cy,r);
+  limbal.addColorStop(0,'rgba(0,0,0,0)'); limbal.addColorStop(1,'rgba(0,0,0,1)');
+  ctx.fillStyle=limbal; ctx.beginPath(); ctx.arc(cx,cy,r,0,Math.PI*2); ctx.fill();
+  var innerShadow=ctx.createRadialGradient(cx,cy,r*0.08,cx,cy,r*0.22);
+  innerShadow.addColorStop(0,'rgba(0,0,0,0.9)'); innerShadow.addColorStop(1,'rgba(0,0,0,0)');
+  ctx.fillStyle=innerShadow; ctx.beginPath(); ctx.arc(cx,cy,r,0,Math.PI*2); ctx.fill();
+  return new THREE.CanvasTexture(cvs);
+}
+
+// ════════════════════════════════════════════════
+// PHOTOREALISTIC BUST
+// ════════════════════════════════════════════════
+var skinMat, bustGroup;
+var _normalMap = genNormalMap(512);
+var _roughMap  = genRoughnessMap(256);
+var _irisTex   = genIrisTex(256, '#4a7060');
+
+function createSkinMat(hexColor) {
+  return new THREE.MeshPhysicalMaterial({
+    color: new THREE.Color(hexColor),
+    roughness: 0.68,
+    metalness: 0,
+    normalMap: _normalMap,
+    normalScale: new THREE.Vector2(0.35, 0.35),
+    roughnessMap: _roughMap,
+    clearcoat: 0.12,
+    clearcoatRoughness: 0.80,
+  });
+}
+
+function createEye(side) {
+  var grp = new THREE.Group();
+  // Eyeball (sclera)
+  var sclMat = new THREE.MeshPhysicalMaterial({
+    color: 0xf2ede6, roughness:0.25, metalness:0,
+    clearcoat:0.6, clearcoatRoughness:0.15
+  });
+  var eyeball = new THREE.Mesh(new THREE.SphereGeometry(0.135,32,32), sclMat);
+  eyeball.castShadow=true; grp.add(eyeball);
+
+  // Iris disc
+  var irisMat = new THREE.MeshStandardMaterial({
+    map:_irisTex, roughness:0.3, metalness:0
+  });
+  var iris = new THREE.Mesh(new THREE.CircleGeometry(0.082,48), irisMat);
+  iris.position.z=0.118; grp.add(iris);
+
+  // Pupil
+  var pupMat = new THREE.MeshStandardMaterial({color:0x050505,roughness:0.4,metalness:0});
+  var pupil = new THREE.Mesh(new THREE.CircleGeometry(0.036,32), pupMat);
+  pupil.position.z=0.1185; grp.add(pupil);
+
+  // Cornea (glossy glass-like shell)
+  var cornMat = new THREE.MeshPhysicalMaterial({
+    transparent:true, opacity:0.08, roughness:0, metalness:0,
+    transmission:0.95, ior:1.38, thickness:0.05,
+    clearcoat:1.0, clearcoatRoughness:0.0,
+    envMapIntensity:1.5
+  });
+  var cornea = new THREE.Mesh(new THREE.SphereGeometry(0.138,32,32), cornMat);
+  grp.add(cornea);
+
+  // Upper eyelid
+  var lidMat = new THREE.MeshPhysicalMaterial({
+    color: new THREE.Color(0xc68642), roughness:0.68, metalness:0,
+    clearcoat:0.12, clearcoatRoughness:0.8
+  });
+  var upperLid = new THREE.Mesh(
+    new THREE.SphereGeometry(0.145,24,12,0,Math.PI*2,0,Math.PI*0.42), lidMat);
+  upperLid.rotation.x = -0.12;
+  upperLid.position.set(0, 0.018, -0.01);
+  upperLid.castShadow=true; grp.add(upperLid);
+
+  // Lower eyelid
+  var lowerLid = new THREE.Mesh(
+    new THREE.SphereGeometry(0.142,24,8,0,Math.PI*2,Math.PI*0.60,Math.PI*0.22), lidMat);
+  lowerLid.rotation.x = 0.08;
+  lowerLid.position.set(0, -0.022, -0.005);
+  lowerLid.castShadow=true; grp.add(lowerLid);
+
+  grp.position.set(side*0.295, 0.08, 0.63);
+  grp.rotation.y = side * (-0.06);
+  return grp;
+}
 
 function buildBust() {
-  const grp = new THREE.Group();
+  if (bustGroup) { scene.remove(bustGroup); }
+  bustGroup = new THREE.Group();
+  skinMat = createSkinMat('#c68642');
 
-  skinMat = new THREE.MeshStandardMaterial({
-    color: new THREE.Color(0xc68642),
-    roughness: 0.62,
-    metalness: 0,
+  // ── HEAD (LatheGeometry for smooth anatomical silhouette) ──
+  var headPts = [
+    new THREE.Vector2(0.00,  1.50),
+    new THREE.Vector2(0.22,  1.46),
+    new THREE.Vector2(0.52,  1.25),
+    new THREE.Vector2(0.70,  0.88),
+    new THREE.Vector2(0.78,  0.52),
+    new THREE.Vector2(0.84,  0.10),  // widest — cheek/zygomatic
+    new THREE.Vector2(0.81, -0.22),
+    new THREE.Vector2(0.73, -0.58),
+    new THREE.Vector2(0.60, -0.88),
+    new THREE.Vector2(0.40, -1.10),
+    new THREE.Vector2(0.18, -1.25),
+    new THREE.Vector2(0.00, -1.30),
+  ];
+  var headGeo = new THREE.LatheGeometry(headPts, 96);
+  var head = new THREE.Mesh(headGeo, skinMat);
+  head.scale.set(0.88, 1, 0.83);
+  head.castShadow=true; head.receiveShadow=true;
+  bustGroup.add(head);
+
+  // ── HAIR CAP ──
+  var hairMat = new THREE.MeshPhysicalMaterial({
+    color:0x1a0e08, roughness:0.88, metalness:0,
+    clearcoat:0.05, clearcoatRoughness:1.0
   });
+  var hairGeo = new THREE.SphereGeometry(1.005,64,32,0,Math.PI*2,0,Math.PI*0.48);
+  var hairMesh = new THREE.Mesh(hairGeo, hairMat);
+  hairMesh.scale.set(0.88,1,0.83);
+  hairMesh.position.y = 0.04;
+  hairMesh.castShadow=true; bustGroup.add(hairMesh);
 
-  function add(geo, x, y, z, sx, sy, sz) {
-    x = x || 0; y = y || 0; z = z || 0;
-    const m = new THREE.Mesh(geo, skinMat);
-    m.position.set(x, y, z);
-    if (sx !== undefined) m.scale.set(sx, sy, sz);
-    m.castShadow    = true;
-    m.receiveShadow = true;
-    grp.add(m);
-    return m;
+  // Hairline definition strip
+  var hlMat = new THREE.MeshPhysicalMaterial({
+    color:0x140a04, roughness:0.85, metalness:0
+  });
+  var hairlineMesh = new THREE.Mesh(
+    new THREE.TorusGeometry(0.75, 0.04, 8, 32, Math.PI), hlMat);
+  hairlineMesh.scale.set(0.88,1,0.83);
+  hairlineMesh.rotation.x = -Math.PI/2;
+  hairlineMesh.position.set(0, 0.70, 0.08);
+  bustGroup.add(hairlineMesh);
+
+  // ── NECK ──
+  var neck = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.255,0.305,0.85,32), skinMat);
+  neck.position.y=-1.45; neck.castShadow=true; neck.receiveShadow=true;
+  bustGroup.add(neck);
+
+  // ── SHOULDERS ──
+  var shoulder = new THREE.Mesh(
+    new THREE.CylinderGeometry(1.32,1.08,0.60,32), skinMat);
+  shoulder.position.y=-2.02; shoulder.castShadow=true; shoulder.receiveShadow=true;
+  bustGroup.add(shoulder);
+  var chest = new THREE.Mesh(
+    new THREE.CylinderGeometry(1.08,0.98,0.50,32), skinMat);
+  chest.position.y=-2.57; chest.castShadow=true; chest.receiveShadow=true;
+  bustGroup.add(chest);
+
+  // ── EARS ──
+  function makeEar(side) {
+    var eg = new THREE.Group();
+    var outerMat = skinMat;
+    var outer = new THREE.Mesh(
+      new THREE.SphereGeometry(0.175,16,12), outerMat);
+    outer.scale.set(0.42,0.75,0.48);
+    outer.castShadow=true; eg.add(outer);
+    // Inner concha (slightly darker)
+    var innerMat = new THREE.MeshPhysicalMaterial({
+      color:0xb87a3d, roughness:0.7, metalness:0, clearcoat:0.08
+    });
+    var inner = new THREE.Mesh(
+      new THREE.SphereGeometry(0.10,12,10), innerMat);
+    inner.scale.set(0.38,0.60,0.3);
+    inner.position.z=0.04; eg.add(inner);
+    // Ear lobe
+    var lobe = new THREE.Mesh(
+      new THREE.SphereGeometry(0.065,10,8), outerMat);
+    lobe.scale.set(0.7,0.6,0.5);
+    lobe.position.y=-0.17; eg.add(lobe);
+    eg.position.set(side*0.856, 0.02, -0.04);
+    eg.rotation.y = side*(Math.PI/2 - 0.18);
+    return eg;
   }
+  bustGroup.add(makeEar(-1));
+  bustGroup.add(makeEar(1));
 
-  // Head — cranium
-  add(new THREE.SphereGeometry(1, 48, 32),              0,  0,     0,    0.82, 1,    0.90);
-  // Jaw
-  add(new THREE.SphereGeometry(0.68, 32, 24),           0, -0.70,  0.04, 0.90, 0.58, 0.86);
-  // Neck
-  add(new THREE.CylinderGeometry(0.26, 0.31, 0.78, 24), 0, -1.43, 0);
-  // Shoulders
-  add(new THREE.CylinderGeometry(1.30, 1.05, 0.55, 32), 0, -2.00, 0);
-  // Chest plate
-  add(new THREE.CylinderGeometry(1.05, 0.95, 0.45, 32), 0, -2.52, 0);
-  // Nose
-  add(new THREE.SphereGeometry(0.11, 12, 8),            0, -0.27,  0.88, 0.80, 0.70, 1.15);
-  // Ears
-  add(new THREE.SphereGeometry(0.20, 12, 10),          -0.82, 0.04, 0,   0.38, 0.72, 0.52);
-  add(new THREE.SphereGeometry(0.20, 12, 10),           0.82, 0.04, 0,   0.38, 0.72, 0.52);
-  // Brow ridge
-  add(new THREE.SphereGeometry(0.54, 16, 8),            0,  0.37,  0.68, 1,    0.34, 0.42);
-  // Cheekbones
-  add(new THREE.SphereGeometry(0.32, 12, 10),          -0.53, -0.14, 0.62, 1, 0.46, 0.60);
-  add(new THREE.SphereGeometry(0.32, 12, 10),           0.53, -0.14, 0.62, 1, 0.46, 0.60);
+  // ── EYES ──
+  bustGroup.add(createEye(-1));
+  bustGroup.add(createEye(1));
+
+  // ── EYEBROWS ──
+  var browMat = new THREE.MeshPhysicalMaterial({
+    color:0x2a1a0e, roughness:0.88, metalness:0
+  });
+  function makeBrow(side) {
+    var bm = new THREE.Mesh(
+      new THREE.SphereGeometry(0.20,12,8), browMat);
+    bm.scale.set(1.0, 0.28, 0.45);
+    bm.position.set(side*0.29, 0.255, 0.64);
+    bm.rotation.z = side*(-0.22);
+    bm.castShadow=true;
+    return bm;
+  }
+  bustGroup.add(makeBrow(-1)); bustGroup.add(makeBrow(1));
+
+  // ── NOSE ──
+  // Bridge
+  var noseBridgeMat = skinMat;
+  var bridge = new THREE.Mesh(
+    new THREE.CapsuleGeometry(0.038,0.28,6,12), noseBridgeMat);
+  bridge.position.set(0,-0.07,0.74);
+  bridge.rotation.x=0.15;
+  bridge.castShadow=true; bustGroup.add(bridge);
+  // Tip
+  var noseTip = new THREE.Mesh(
+    new THREE.SphereGeometry(0.085,16,12), skinMat);
+  noseTip.scale.set(1.1,0.80,1.1);
+  noseTip.position.set(0,-0.30,0.82);
+  noseTip.castShadow=true; bustGroup.add(noseTip);
+  // Nostrils
+  var nostrilMat = new THREE.MeshPhysicalMaterial({
+    color:0xaa6633, roughness:0.75, metalness:0
+  });
+  function makeNostril(side) {
+    var n = new THREE.Mesh(new THREE.SphereGeometry(0.055,10,8), nostrilMat);
+    n.scale.set(0.80,0.60,0.70);
+    n.position.set(side*0.092,-0.35,0.78);
+    n.castShadow=true; return n;
+  }
+  bustGroup.add(makeNostril(-1)); bustGroup.add(makeNostril(1));
+  // Ala (nose wings)
+  function makeAla(side) {
+    var a = new THREE.Mesh(new THREE.SphereGeometry(0.065,10,8), skinMat);
+    a.scale.set(0.85,0.65,0.70);
+    a.position.set(side*0.115,-0.33,0.77);
+    a.castShadow=true; return a;
+  }
+  bustGroup.add(makeAla(-1)); bustGroup.add(makeAla(1));
+
+  // ── LIPS ──
+  var lipMat = new THREE.MeshPhysicalMaterial({
+    color:0xb86055, roughness:0.48, metalness:0,
+    clearcoat:0.35, clearcoatRoughness:0.55,
+    normalMap:_normalMap, normalScale: new THREE.Vector2(0.15,0.15)
+  });
   // Upper lip
-  add(new THREE.SphereGeometry(0.30, 10, 8),            0, -0.50,  0.75, 1.2, 0.40, 0.60);
+  var upperLip = new THREE.Mesh(
+    new THREE.SphereGeometry(0.22,16,10), lipMat);
+  upperLip.scale.set(1.25,0.42,0.72);
+  upperLip.position.set(0,-0.54,0.76);
+  upperLip.castShadow=true; bustGroup.add(upperLip);
+  // Upper lip cupid's bow (two lobes)
+  function makeCupid(side) {
+    var c = new THREE.Mesh(new THREE.SphereGeometry(0.10,10,8), lipMat);
+    c.scale.set(0.80,0.55,0.65);
+    c.position.set(side*0.09,-0.50,0.77);
+    c.castShadow=true; return c;
+  }
+  bustGroup.add(makeCupid(-1)); bustGroup.add(makeCupid(1));
+  // Lower lip
+  var lowerLip = new THREE.Mesh(
+    new THREE.SphereGeometry(0.22,16,10), lipMat);
+  lowerLip.scale.set(1.30,0.50,0.70);
+  lowerLip.position.set(0,-0.66,0.74);
+  lowerLip.castShadow=true; bustGroup.add(lowerLip);
 
-  grp.position.y = 0.3;
-  scene.add(grp);
+  // ── BROW BONE (subtle forehead ridge) ──
+  var browBone = new THREE.Mesh(
+    new THREE.SphereGeometry(0.58,16,8), skinMat);
+  browBone.scale.set(0.88,0.30,0.38);
+  browBone.position.set(0,0.22,0.63);
+  browBone.castShadow=true; bustGroup.add(browBone);
+
+  bustGroup.position.y = 0.35;
+  scene.add(bustGroup);
 }
+
 buildBust();
 
 // ════════════════════════════════════════════════
@@ -962,7 +1247,19 @@ document.querySelectorAll('.sw').forEach(function(sw) {
   sw.addEventListener('click', function() {
     document.querySelectorAll('.sw').forEach(function(s) { s.classList.remove('act'); });
     sw.classList.add('act');
-    skinMat.color.set(sw.dataset.color);
+    var col = sw.dataset.color;
+    skinMat.color.set(col);
+    // propagate to eyelid materials that copy skin tone
+    bustGroup.traverse(function(o) {
+      if (o.isMesh && o.material && o.material.color) {
+        var hex = o.material.color.getHexString();
+        if (hex === skinMat.color.getHexString()) {
+          o.material.color.set(col);
+          o.material.needsUpdate = true;
+        }
+      }
+    });
+    skinMat.needsUpdate = true;
   });
 });
 
